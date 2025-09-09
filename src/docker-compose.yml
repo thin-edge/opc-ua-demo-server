@@ -2,7 +2,7 @@ version: "3.2"
 services:
   opcserver:
     container_name: opcserver
-    image: ghcr.io/mstoffel-sag/opc-ua-demo-server:latest
+    image: switschel/opc-ua-demo-server:latest
     restart: always
     ports:
       - "4840:4840"
