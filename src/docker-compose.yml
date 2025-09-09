@@ -8,6 +8,11 @@ services:
       - "4840:4840"
     networks:
       backend:
+    environment:
+    # Adjusted pump simulation parameters
+      - PUMP_FILTER_DEGRADATION_RATE=3
+      - PUMP_AUTO_RESET_MINUTES=1
+      - PUMP_DEFAULT_OPERATING_LEVEL=80
 networks:
   backend:
     name: opc-ua-gateway_backend

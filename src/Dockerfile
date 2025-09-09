@@ -11,8 +11,8 @@ LABEL org.opencontainers.image.created=$BUILDTIME
 LABEL org.opencontainers.image.version=$VERSION
 LABEL org.opencontainers.image.revision=$REVISION
 LABEL org.opencontainers.image.description="OPC-UA Demo Server"
-LABEL org.opencontainers.image.source="https://github.com/Cumulocity-IoT/opc-ua-demo-server"
-LABEL org.opencontainers.image.authors="Marco Stoffel"
+LABEL org.opencontainers.image.source="https://hub.docker.com/r/switschel/opc-ua-demo-server"
+LABEL org.opencontainers.image.authors="Marco Stoffel, Stefan Witschel"
 LABEL org.opencontainers.image.licenses="Apache 2.0"
 
 ### 2. Install opcua
