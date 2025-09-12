@@ -171,6 +171,9 @@ class PumpController:
 # Create controller instance for method callbacks
 pump_controller = PumpController()
 
+# Get update interval from environment with a default of 2.0 seconds
+update_interval = float(os.environ.get("PUMP_UPDATE_INTERVAL", 2.0))
+_logger.info(f"Initial update interval set to {update_interval} seconds")
 
 # Method to stop the pump
 @uamethod
@@ -221,12 +224,28 @@ def change_oil(parent):
     return pump_controller.change_oil()
 
 
+# Method to set the update interval
+@uamethod
+def set_update_interval(parent, seconds):
+    global update_interval
+    if seconds < 0.1:
+        _logger.warning(f"Invalid update interval requested: {seconds} (must be ≥ 0.1)")
+        return False
+    if seconds > 60:
+        _logger.warning(f"Invalid update interval requested: {seconds} (must be ≤ 60)")
+        return False
+    
+    update_interval = float(seconds)
+    _logger.info(f"Update interval set to {update_interval} seconds")
+    return True
+
+
 async def main():
     server = Server()
     await server.init()
     server.historize_node_data_changes = True
     server.set_endpoint("opc.tcp://0.0.0.0:4840/")
-    server.set_server_name("FreeOpcUa Example Server")
+    server.set_server_name("Cumulocity Demo OPC UA Server")
     server.set_security_policy(
         [
             ua.SecurityPolicyType.NoSecurity,
@@ -236,72 +255,88 @@ async def main():
     )
 
     # setup our own namespace
-    uri = "http://examples.freeopcua.github.io"
+    uri = "http://www.cumulocity.com"
     idx = await server.register_namespace(uri)
 
+    # Create a server configuration object
+    server_config = await server.nodes.objects.add_object(idx, "ServerConfig")
+    
+    # Add update interval variable to server configuration
+    update_interval_var = await server_config.add_variable(idx, "updateInterval", update_interval)
+    await update_interval_var.set_writable()
+    
+    # Add method to set update interval to server configuration
+    await server_config.add_method(
+        idx,
+        "setUpdateInterval",
+        set_update_interval,
+        [ua.VariantType.Double],  # seconds
+        [ua.VariantType.Boolean]  # success/failure
+    )
+
     # populating our address space
-    # Defining pump
-    pump = await server.nodes.objects.add_object(idx, "Pump")
+    # Defining pump01 (the main pump with all functionality)
+    pump01 = await server.nodes.objects.add_object(idx, "Pump01")
     # operating Level of pump in %
-    performance = await pump.add_variable(idx, "operatingLevel", 100)
+    performance = await pump01.add_variable(idx, "operatingLevel", 100)
     await performance.set_writable()
     # statuses are: Idle, Running, Alarm
-    status = await pump.add_variable(idx, "status", "Idle", ua.VariantType.String)
+    status = await pump01.add_variable(idx, "status", "Idle", ua.VariantType.String)
     await status.set_writable()
     # flow in l/s
-    flow = await pump.add_variable(idx, "flow", 5.0)
+    flow = await pump01.add_variable(idx, "flow", 5.0)
     await flow.set_writable()
     # Alarms could be: "PowerFailure", "Leakage", "FilterClogged"
-    alarm = await pump.add_variable(idx, "activeAlarm", 0)
+    alarm = await pump01.add_variable(idx, "activeAlarm", 0)
     await alarm.set_writable()
     # Current Energy consumption in W
-    power = await pump.add_variable(idx, "power", 450)
+    power = await pump01.add_variable(idx, "power", 450)
     await power.set_writable()
     # Run hours in h
-    run_hours = await pump.add_variable(idx, "runHours", 0)
+    run_hours = await pump01.add_variable(idx, "runHours", 0)
     await run_hours.set_writable()
     
     # Add filter state as percentage (100% = clean, 0% = completely clogged)
-    filter_state = await pump.add_variable(idx, "filterState", 100)
+    filter_state = await pump01.add_variable(idx, "filterState", 100)
     await filter_state.set_writable()
     
     # Add oil level as percentage (100% = full, 0% = empty)
-    oil_level = await pump.add_variable(idx, "oilLevel", 100)
+    oil_level = await pump01.add_variable(idx, "oilLevel", 100)
     await oil_level.set_writable()
     
     # Add inflow temperature in °C
-    inflow_temperature = await pump.add_variable(idx, "inflowTemperature", 20.0)
+    inflow_temperature = await pump01.add_variable(idx, "inflowTemperature", 20.0)
     await inflow_temperature.set_writable()
     
     # Add bearing temperature in °C
-    bearing_temperature = await pump.add_variable(idx, "bearingTemperature", 35.0)
+    bearing_temperature = await pump01.add_variable(idx, "bearingTemperature", 35.0)
     await bearing_temperature.set_writable()
     
     # Add alarm time remaining (seconds until auto-reset)
-    alarm_time_remaining = await pump.add_variable(idx, "alarmTimeRemaining", 0)
+    alarm_time_remaining = await pump01.add_variable(idx, "alarmTimeRemaining", 0)
     await alarm_time_remaining.set_writable()
     
     # Add command feedback variables to track last command execution
-    last_command = await pump.add_variable(idx, "lastCommand", "None", ua.VariantType.String)
+    last_command = await pump01.add_variable(idx, "lastCommand", "None", ua.VariantType.String)
     await last_command.set_writable()
     
-    command_success = await pump.add_variable(idx, "commandSuccess", True, ua.VariantType.Boolean)
+    command_success = await pump01.add_variable(idx, "commandSuccess", True, ua.VariantType.Boolean)
     await command_success.set_writable()
     
     # Add filter degradation rate in minutes (time to clog at full load)
-    filter_degradation_rate = await pump.add_variable(idx, "filterDegradationRate", 30)
+    filter_degradation_rate = await pump01.add_variable(idx, "filterDegradationRate", 30)
     await filter_degradation_rate.set_writable()
     
     # Add auto-reset minutes configuration
-    auto_reset_minutes = await pump.add_variable(idx, "autoResetMinutes", pump_controller.auto_reset_minutes)
+    auto_reset_minutes = await pump01.add_variable(idx, "autoResetMinutes", pump_controller.auto_reset_minutes)
     await auto_reset_minutes.set_writable()
     
     # Add default operating level configuration
-    default_operating_level = await pump.add_variable(idx, "defaultOperatingLevel", pump_controller.default_operating_level)
+    default_operating_level = await pump01.add_variable(idx, "defaultOperatingLevel", pump_controller.default_operating_level)
     await default_operating_level.set_writable()
     
     # Add methods to control the pump
-    await pump.add_method(
+    await pump01.add_method(
         idx, 
         "stopPump", 
         stop_pump, 
@@ -309,7 +344,7 @@ async def main():
         [ua.VariantType.Boolean]
     )
     
-    await pump.add_method(
+    await pump01.add_method(
         idx, 
         "startPump", 
         start_pump, 
@@ -317,7 +352,7 @@ async def main():
         [ua.VariantType.Boolean]
     )
     
-    await pump.add_method(
+    await pump01.add_method(
         idx,
         "setOperatingLevel",
         set_operating_level,
@@ -326,7 +361,7 @@ async def main():
     )
     
     # Add method to configure filter degradation rate
-    await pump.add_method(
+    await pump01.add_method(
         idx,
         "setFilterDegradationRate",
         set_filter_degradation_rate,
@@ -335,7 +370,7 @@ async def main():
     )
     
     # Add method to configure auto-reset minutes
-    await pump.add_method(
+    await pump01.add_method(
         idx,
         "setAutoResetMinutes",
         set_auto_reset_minutes,
@@ -344,7 +379,7 @@ async def main():
     )
     
     # Add method to manually reset the filter
-    await pump.add_method(
+    await pump01.add_method(
         idx,
         "resetFilter",
         reset_filter,
@@ -353,13 +388,43 @@ async def main():
     )
     
     # Add method to manually change the oil
-    await pump.add_method(
+    await pump01.add_method(
         idx,
         "changeOil",
         change_oil,
         [],
         [ua.VariantType.Boolean]
     )
+
+    # Add Pump02 (dummy pump with static values)
+    pump02 = await server.nodes.objects.add_object(idx, "Pump02")
+    await pump02.add_variable(idx, "operatingLevel", 85)
+    await pump02.add_variable(idx, "status", "Running", ua.VariantType.String)
+    await pump02.add_variable(idx, "flow", 4.2)
+    await pump02.add_variable(idx, "activeAlarm", 0)
+    await pump02.add_variable(idx, "power", 380)
+    await pump02.add_variable(idx, "runHours", 120)
+    await pump02.add_variable(idx, "filterState", 92)
+    await pump02.add_variable(idx, "oilLevel", 93)
+    await pump02.add_variable(idx, "inflowTemperature", 21.5)
+    await pump02.add_variable(idx, "bearingTemperature", 37.2)
+    await pump02.add_variable(idx, "lastCommand", "None", ua.VariantType.String)
+    await pump02.add_variable(idx, "commandSuccess", True, ua.VariantType.Boolean)
+
+    # Add Pump03 (dummy pump with static values)
+    pump03 = await server.nodes.objects.add_object(idx, "Pump03")
+    await pump03.add_variable(idx, "operatingLevel", 65)
+    await pump03.add_variable(idx, "status", "Running", ua.VariantType.String)
+    await pump03.add_variable(idx, "flow", 3.5)
+    await pump03.add_variable(idx, "activeAlarm", 0)
+    await pump03.add_variable(idx, "power", 320)
+    await pump03.add_variable(idx, "runHours", 250)
+    await pump03.add_variable(idx, "filterState", 78)
+    await pump03.add_variable(idx, "oilLevel", 85)
+    await pump03.add_variable(idx, "inflowTemperature", 19.8)
+    await pump03.add_variable(idx, "bearingTemperature", 39.5)
+    await pump03.add_variable(idx, "lastCommand", "None", ua.VariantType.String)
+    await pump03.add_variable(idx, "commandSuccess", True, ua.VariantType.Boolean)
 
     # starting!
     async with server:
@@ -386,7 +451,13 @@ async def main():
         temp_cycle_hours = 24  # 24-hour temperature cycle
         
         while True:
-            await asyncio.sleep(1.0)
+            # Use the configurable update interval
+            await asyncio.sleep(update_interval)
+            
+            # Update the update_interval variable in OPC UA
+            await server.write_attribute_value(
+                update_interval_var.nodeid, ua.DataValue(update_interval)
+            )
             
             # Check if we should auto-reset from alarm state
             if pump_controller.check_alarm_auto_reset():
@@ -430,8 +501,8 @@ async def main():
                 base_rate_per_second = pump_controller.filter_degradation_base_rate / 60.0
                 load_factor_per_second = pump_controller.filter_degradation_load_factor / 60.0
                 
-                # Calculate degradation based on current load and configured rates
-                degradation_rate = base_rate_per_second + (currentLevel / 100.0) * load_factor_per_second
+                # Calculate degradation based on current load and configured rates - scale by update_interval
+                degradation_rate = (base_rate_per_second + (currentLevel / 100.0) * load_factor_per_second) * update_interval
                 filterStateValue = max(0, filterStateValue - degradation_rate)
             
             # Oil level decreases over time when pump is running
@@ -442,7 +513,8 @@ async def main():
                 oil_depletion_per_second = oil_depletion_per_hour / 3600.0
                 
                 # Adjust depletion based on operating level (higher level = faster depletion)
-                oil_depletion = oil_depletion_per_second * (0.5 + currentLevel / 200.0)
+                # Scale by update_interval to account for varying update rates
+                oil_depletion = oil_depletion_per_second * (0.5 + currentLevel / 200.0) * update_interval
                 
                 # Apply oil depletion
                 oilLevelValue = max(0, oilLevelValue - oil_depletion)
@@ -462,10 +534,11 @@ async def main():
             # Calculate bearing temperature based on operating level, oil level, and filter state
             # Start with a base temperature when idle
             if currentLevel == 0:
-                # Bearing cools down slowly when pump is idle
+                # Bearing cools down slowly when pump is idle - scale by update_interval
+                bearing_cool_rate = 0.2 * update_interval
                 bearingTempValue = max(
                     pump_controller.base_bearing_temp,
-                    bearingTempValue - 0.2  # Cool down rate in °C per second
+                    bearingTempValue - bearing_cool_rate
                 )
             else:
                 # Temperature increases with operating level
@@ -486,11 +559,13 @@ async def main():
                 # Add small random variations
                 target_bearing_temp += random.uniform(-0.2, 0.2)
                 
-                # Approach target temperature gradually
+                # Approach target temperature gradually - scale by update_interval
                 if bearingTempValue < target_bearing_temp:
-                    bearingTempValue = min(target_bearing_temp, bearingTempValue + 0.3)
+                    bearing_heat_rate = 0.3 * update_interval
+                    bearingTempValue = min(target_bearing_temp, bearingTempValue + bearing_heat_rate)
                 else:
-                    bearingTempValue = max(target_bearing_temp, bearingTempValue - 0.1)
+                    bearing_cool_rate = 0.1 * update_interval
+                    bearingTempValue = max(target_bearing_temp, bearingTempValue - bearing_cool_rate)
             
             # Determine if an alarm condition exists
             alarmValue = 0
@@ -514,14 +589,14 @@ async def main():
                 alarmType = "BearingOverheated"
                 pump_controller.enter_alarm_state(alarmType)
             
-            # Random power failure
-            if random.random() < 0.002 and not pump_controller.in_alarm_state:
+            # Random power failure - scale probability by update_interval
+            if random.random() < (0.002 * update_interval) and not pump_controller.in_alarm_state:
                 alarmValue = 1
                 alarmType = "PowerFailure"
                 pump_controller.enter_alarm_state(alarmType)
             
-            # Leakage probability increases with lower filter state
-            leakageChance = leakageProbability * (1 + (100 - filterStateValue)/20)
+            # Leakage probability increases with lower filter state - scale by update_interval
+            leakageChance = leakageProbability * (1 + (100 - filterStateValue)/20) * update_interval
             if random.random() < leakageChance and not pump_controller.in_alarm_state:
                 alarmValue = 1
                 alarmType = "Leakage"
@@ -563,8 +638,9 @@ async def main():
                 powerValue = 0
                 
             # Increment run hours only when pump is actually running
+            # Scale by update_interval (convert to hours)
             if pumpState == "Running":
-                runHoursValue += 1
+                runHoursValue += update_interval / 3600
             
             # Calculate current filter degradation rate in minutes (for display)
             current_degradation_rate = 30  # Default value
@@ -572,7 +648,7 @@ async def main():
                 current_degradation_rate = int(100.0 / (pump_controller.filter_degradation_base_rate + 
                                                       pump_controller.filter_degradation_load_factor))
             
-            # Write values to OPC UA server
+            # Write values to OPC UA server (only for Pump01)
             await server.write_attribute_value(
                 power.nodeid, ua.DataValue(int(powerValue))
             )
