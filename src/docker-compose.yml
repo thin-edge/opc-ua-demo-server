@@ -10,10 +10,10 @@ services:
       backend:
     environment:
     # Adjusted pump simulation parameters
-      - PUMP_FILTER_DEGRADATION_RATE=3
-      - PUMP_AUTO_RESET_MINUTES=1
-      - PUMP_DEFAULT_OPERATING_LEVEL=80
-      - PUMP_UPDATE_INTERVAL=3.0
+      - PUMP_FILTER_DEGRADATION_RATE=3 # in minutes the filter will be clogged
+      - PUMP_AUTO_RESET_MINUTES=1 # after 1 minute the alarm will be reset and the cycle starts again
+      - PUMP_DEFAULT_OPERATING_LEVEL=80 # Pump operating level
+      - PUMP_UPDATE_INTERVAL=3.0 # new measurements every 3 seconds
 networks:
   backend:
     name: opc-ua-gateway_backend
