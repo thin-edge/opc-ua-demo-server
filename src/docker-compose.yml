@@ -13,6 +13,7 @@ services:
       - PUMP_FILTER_DEGRADATION_RATE=3
       - PUMP_AUTO_RESET_MINUTES=1
       - PUMP_DEFAULT_OPERATING_LEVEL=80
+      - PUMP_UPDATE_INTERVAL=3.0
 networks:
   backend:
     name: opc-ua-gateway_backend
