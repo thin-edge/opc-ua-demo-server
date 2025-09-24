@@ -16,7 +16,8 @@ LABEL org.opencontainers.image.authors="Marco Stoffel, Stefan Witschel"
 LABEL org.opencontainers.image.licenses="Apache 2.0"
 
 ### 2. Install opcua
-RUN pip install asyncua
+RUN pip install asyncua==1.1.8
+COPY monitored_item_service.py /usr/local/lib/python3.11/site-packages/asyncua/server/
 
 ### 3. Start server
 EXPOSE 4840    
