@@ -640,7 +640,7 @@ async def main():
             # Increment run hours only when pump is actually running
             # Scale by update_interval (convert to hours)
             if pumpState == "Running":
-                runHoursValue += update_interval / 3600
+                runHoursValue += (update_interval / 3600) *12
             
             # Calculate current filter degradation rate in minutes (for display)
             current_degradation_rate = 30  # Default value
