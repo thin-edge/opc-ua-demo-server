@@ -31,15 +31,16 @@ jobs:
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ vars.DOCKERHUB_USER }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
-            switschel/opc-ua-demo-server
+            ghcr.io/thin-edge/opc-ua-demo-server
           tags: |
             type=raw,value={{tag}}
             type=raw,value=latest
