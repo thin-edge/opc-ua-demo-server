@@ -19,3 +19,13 @@ See an example docker-compose.yml file in src/docker-compose.yml. You can set th
       - PUMP_AUTO_RESET_MINUTES=1 # after 1 minute the alarm will be reset and the cycle starts again
       - PUMP_DEFAULT_OPERATING_LEVEL=80 # Pump operating level
       - PUMP_UPDATE_INTERVAL=3.0 # new measurements every 3 seconds
+
+## Local development
+
+You can build the image locally with:
+
+`docker build -t opcserver:latest -f src/Dockerfile .`
+
+Then you can run the container with:
+
+`docker compose -f src/docker-compose_local.yml up`
