@@ -1,0 +1,20 @@
+version: "3.2"
+services:
+  opcserver:
+    container_name: opcserver
+    image: opcserver
+    restart: always
+    ports:
+      - "4840:4840"
+    networks:
+      backend:
+    environment:
+      - PUMP_FILTER_DEGRADATION_RATE=3
+      - PUMP_AUTO_RESET_MINUTES=1
+      - PUMP_DEFAULT_OPERATING_LEVEL=80
+      - PUMP_UPDATE_INTERVAL=3.0
+
+networks:
+  backend:
+    external: true
+    name: opc-ua-gateway_backend
