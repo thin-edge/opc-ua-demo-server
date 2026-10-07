@@ -10,6 +10,8 @@ from math import sin
 
 from asyncua import ua, uamethod, Server
 
+from datatypes import DataTypeDemo
+
 
 _logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -50,6 +52,7 @@ class PumpController:
         self.command_success = True
         # Alarm state tracking
         self.in_alarm_state = False
+        self.alarm_type = None  # e.g. "FilterClogged" while in alarm
         self.alarm_start_time = 0
         self.previous_target_level = 0  # Store level before alarm
         self.auto_reset_minutes = float(os.environ.get("PUMP_AUTO_RESET_MINUTES", 3.0))  # Minutes until auto-reset
@@ -148,6 +151,7 @@ class PumpController:
         if not self.in_alarm_state:
             _logger.info(f"Entering alarm state: {alarm_type}")
             self.in_alarm_state = True
+            self.alarm_type = alarm_type
             self.alarm_start_time = time.time()
             self.previous_target_level = self.target_level
             self.target_level = 0  # Stop the pump
@@ -162,6 +166,7 @@ class PumpController:
         if elapsed_minutes >= self.auto_reset_minutes:
             _logger.info(f"Auto-resetting pump after {elapsed_minutes:.1f} minutes in alarm state")
             self.in_alarm_state = False
+            self.alarm_type = None
             self.target_level = self.previous_target_level  # Restore previous target level
             return True
             
@@ -426,6 +431,9 @@ async def main():
     await pump03.add_variable(idx, "lastCommand", "None", ua.VariantType.String)
     await pump03.add_variable(idx, "commandSuccess", True, ua.VariantType.Boolean)
 
+    # Structured values and the less common built-in types (see datatypes.py)
+    datatype_demo = await DataTypeDemo.create(server, idx, pump01)
+
     # starting!
     async with server:
         print("Available loggers are: ", logging.Logger.manager.loggerDict.keys())
@@ -485,6 +493,7 @@ async def main():
             if pump_controller.last_command == "resetFilter" and pump_controller.command_success:
                 _logger.info("Manually resetting filter to 100%")
                 filterStateValue = 100
+                datatype_demo.service_done()
                 # Reset the command to avoid multiple resets
                 pump_controller.last_command = "None"
             
@@ -492,6 +501,7 @@ async def main():
             if pump_controller.last_command == "changeOil" and pump_controller.command_success:
                 _logger.info("Manually changing oil to 100%")
                 oilLevelValue = 100
+                datatype_demo.service_done()
                 # Reset the command to avoid multiple changes
                 pump_controller.last_command = "None"
             
@@ -698,6 +708,19 @@ async def main():
             )
             await server.write_attribute_value(
                 command_success.nodeid, ua.DataValue(pump_controller.command_success)
+            )
+
+            await datatype_demo.update(
+                state=pumpState,
+                level=currentLevel,
+                target_level=pump_controller.target_level,
+                flow=flowValue,
+                power=powerValue,
+                bearing_temp=bearingTempValue,
+                inflow_temp=inflowTempValue,
+                filter_state=filterStateValue,
+                run_hours=runHoursValue,
+                alarm=pump_controller.alarm_type,
             )
 
 
