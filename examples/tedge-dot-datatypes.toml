@@ -1,0 +1,205 @@
+# tedge-dot OPC UA connector configuration for the DataTypes demo nodes of this server
+# (src/datatypes.py): structure fields, a union, array elements and the built-in types without
+# a primitive of their own.
+#
+# Structures, unions and array elements need a tedge-dot build with structured-value support
+# (thin-edge/tedge-dot#61, Rust build). The `bytes` points (RawFrame) work in the C build too.
+#
+# Try it without a broker:
+#   tedge-dot read -c examples/tedge-dot-datatypes.toml
+#   tedge-dot read -c examples/tedge-dot-datatypes.toml --poll --interval 3s -p 'status_*'
+#
+# Adjust the endpoint (and [mqtt]) to where the server and the broker run.
+
+[connector]
+protocol      = "opcua"
+service_name  = "tedge-dot-datatypes"
+poll_interval = "3s"
+
+[mqtt]
+host = "localhost"
+port = 1883
+
+[connection]
+application_name = "tedge-dot-datatypes"
+security_policy  = "None"
+security_mode    = "none"
+
+[[device]]
+name             = "pump01-datatypes"
+protocol_address = { endpoint = "opc.tcp://localhost:4840/", security_policy = "None", security_mode = "none" }
+default_mode     = "typed"
+
+  # ---- PumpStatus: fields of one structure (one Read per poll for all of them) ------------
+
+  [[device.point]]
+  id       = "status_running"
+  datatype = "bool"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "Running" }
+
+  [[device.point]]
+  id       = "status_level"
+  datatype = "float64"
+  unit     = "%"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "OperatingLevel" }
+
+  # A field of the nested PumpMotor structure.
+  [[device.point]]
+  id       = "status_motor_current"
+  datatype = "float32"
+  unit     = "A"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "Motor.Current" }
+
+  [[device.point]]
+  id       = "status_motor_temperature"
+  datatype = "float32"
+  unit     = "°C"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "Motor.Temperature" }
+
+  [[device.point]]
+  id       = "status_label"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "Label" }
+
+  # An enumeration field is an int32; map turns it into its name.
+  [[device.point]]
+  id       = "status_mode"
+  datatype = "int32"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "Mode" }
+  map      = { cases = [{ eq = 0, to = "idle" }, { eq = 1, to = "running" }, { eq = 2, to = "alarm" }] }
+
+  # One element of an array field: the newest of the five flow values.
+  [[device.point]]
+  id       = "status_flow_latest"
+  datatype = "float64"
+  unit     = "l/s"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "FlowHistory[4]" }
+
+  # A DateTime field, as RFC 3339 text.
+  [[device.point]]
+  id       = "status_last_service"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "LastService" }
+
+  # A field of an element of an array of structures: Readings[1] is the power reading.
+  [[device.point]]
+  id       = "status_power"
+  datatype = "float64"
+  unit     = "W"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "Readings[1].Value" }
+
+  # An optional field: present only while the pump is in alarm. While it is absent the sample
+  # is bad and says so -- expected most of the time.
+  [[device.point]]
+  id       = "status_alarm_text"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "AlarmText" }
+
+  [[device.point]]
+  id       = "status_run_hours"
+  datatype = "uint32"
+  unit     = "h"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatus", field = "RunHours" }
+
+  # The whole encoded structure, for a flow to decode itself: `raw` plus addr.data_type and
+  # addr.encoding_id.
+  [[device.point]]
+  id      = "status_raw"
+  mode    = "raw"
+  address = { node_id = "ns=2;s=DataTypes.PumpStatus" }
+
+  # ---- Same value, variable declared with the abstract Structure type -------------------
+
+  [[device.point]]
+  id       = "abstract_level"
+  datatype = "float64"
+  address  = { node_id = "ns=2;s=DataTypes.PumpStatusAbstract", field = "OperatingLevel" }
+
+  # ---- Motor: a structure that changes every update, delivered by subscription ----------
+
+  [[device.point]]
+  id        = "motor_current"
+  datatype  = "float32"
+  unit      = "A"
+  subscribe = true
+  address   = { node_id = "ns=2;s=DataTypes.Motor", field = "Current" }
+
+  # ---- Setpoint: a union -- Level while running, Reason while in alarm --------------------
+  # The inactive member gives a bad sample that names it.
+
+  [[device.point]]
+  id       = "setpoint_level"
+  datatype = "float64"
+  address  = { node_id = "ns=2;s=DataTypes.Setpoint", field = "Level" }
+
+  [[device.point]]
+  id       = "setpoint_reason"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.Setpoint", field = "Reason" }
+
+  # ---- Array variables: one element by index ------------------------------------------------
+
+  [[device.point]]
+  id       = "flow_latest"
+  datatype = "float64"
+  unit     = "l/s"
+  address  = { node_id = "ns=2;s=DataTypes.FlowHistory", index = 4 }
+
+  [[device.point]]
+  id       = "temperature_bearing"
+  datatype = "float64"
+  unit     = "°C"
+  address  = { node_id = "ns=2;s=DataTypes.Temperatures", index = 1 }
+
+  # ---- Built-in types; `datatype` picks the rendering --------------------------------------
+
+  [[device.point]]
+  id       = "last_service"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.LastService" }
+
+  [[device.point]]
+  id       = "last_service_ms"
+  datatype = "int64"
+  address  = { node_id = "ns=2;s=DataTypes.LastService" }
+
+  [[device.point]]
+  id       = "status_text"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.StatusText" }
+
+  [[device.point]]
+  id       = "last_error"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.LastError" }
+
+  [[device.point]]
+  id       = "last_error_code"
+  datatype = "uint32"
+  address  = { node_id = "ns=2;s=DataTypes.LastError" }
+
+  [[device.point]]
+  id       = "device_uid"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.DeviceUid" }
+
+  [[device.point]]
+  id       = "related_node"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.RelatedNode" }
+
+  [[device.point]]
+  id       = "related_node_expanded"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.RelatedNodeExpanded" }
+
+  [[device.point]]
+  id       = "browse_name"
+  datatype = "string"
+  address  = { node_id = "ns=2;s=DataTypes.BrowseNameValue" }
+
+  # ByteString: hex text as the value, the bytes as `raw`. Works in the C build as well.
+  [[device.point]]
+  id       = "raw_frame"
+  datatype = "bytes"
+  address  = { node_id = "ns=2;s=DataTypes.RawFrame" }

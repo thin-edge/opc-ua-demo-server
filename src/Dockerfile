@@ -23,5 +23,5 @@ RUN pip --no-cache-dir install git+https://github.com/FreeOpcUa/opcua-asyncio.gi
 RUN apt-get purge -y --auto-remove git
 ### 3. Start server
 EXPOSE 4840    
-ADD server.py /
+ADD server.py datatypes.py /
 CMD ["python3", "server.py"]
