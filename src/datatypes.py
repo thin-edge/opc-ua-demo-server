@@ -27,6 +27,8 @@ Most nodes follow Pump01's simulation, so they change and can be subscribed to:
 | RelatedNode, RelatedNodeExpanded | NodeId and ExpandedNodeId, pointing at Pump01              |
 | BrowseNameValue              | QualifiedName                                                  |
 | RawFrame                     | ByteString: level, filter state and flow packed big-endian     |
+| AlarmInfo                    | structure with a second enum, a LocalizedText field and an     |
+|                              | optional DateTime (`RaisedAt`, present only while in alarm)    |
 """
 import struct
 import uuid
@@ -37,6 +39,22 @@ from asyncua.common.structures104 import new_enum, new_struct, new_struct_field
 
 DEVICE_UID = uuid.UUID("72962b91-fa75-4ae6-8d28-b404dc7daf63")
 FLOW_HISTORY_LEN = 5
+
+ALARM_TYPES = ["NoAlarm", "FilterClogged", "OilLow", "BearingOverheated", "PowerFailure",
+               "Leakage"]
+
+
+def stamped(value, variant_type=None):
+    """
+    A DataValue with source and server timestamps. Server.write_attribute_value stores the
+    DataValue as given, so without this the values have no timestamps: clients fall back to
+    their receive time and the history store cannot sort them.
+    """
+    now = datetime.now(timezone.utc)
+    if not isinstance(value, ua.Variant):
+        value = ua.Variant(value, variant_type) if variant_type else ua.Variant(value)
+    return ua.DataValue(value, SourceTimestamp=now, ServerTimestamp=now)
+
 
 # What an alarm reports as LastError. Any Bad code would do; these read well.
 ALARM_STATUS = {
@@ -127,6 +145,38 @@ class DataTypeDemo:
             "RawFrame", self._frame(0, 100, 0.0), ua.VariantType.ByteString)
         return self
 
+    async def add_alarm_info(self):
+        """
+        The PumpAlarmInfo type and the AlarmInfo node. Created after everything in `create`,
+        so the numeric node ids of the existing types and nodes stay the same.
+        """
+        alarm_type_enum = await new_enum(self.server, self.idx, "PumpAlarmType", ALARM_TYPES)
+        await new_struct(self.server, self.idx, "PumpAlarmInfo", [
+            new_struct_field("AlarmType", alarm_type_enum),
+            new_struct_field("Active", ua.VariantType.Boolean),
+            new_struct_field("Severity", ua.VariantType.UInt16),
+            new_struct_field("Message", ua.VariantType.LocalizedText),
+            new_struct_field("RaisedAt", ua.VariantType.DateTime, optional=True),
+            new_struct_field("RemainingSeconds", ua.VariantType.Int32),
+            new_struct_field("AlarmCount", ua.VariantType.UInt32),
+        ])
+        await self.server.load_data_type_definitions()
+        self.alarm_info = await self._add(
+            "AlarmInfo", self._alarm_info(None, 0, 0, 0, 0), ua.VariantType.ExtensionObject,
+            ua.PumpAlarmInfo.data_type)
+
+    @staticmethod
+    def _alarm_info(alarm, severity, start, remaining, count):
+        return ua.PumpAlarmInfo(
+            AlarmType=ua.PumpAlarmType[alarm or "NoAlarm"],
+            Active=bool(alarm),
+            Severity=int(severity) if alarm else 0,
+            Message=ua.LocalizedText(f"{alarm} on Pump01" if alarm else "No alarm", "en-US"),
+            RaisedAt=datetime.fromtimestamp(start, timezone.utc) if alarm else None,
+            RemainingSeconds=int(remaining),
+            AlarmCount=int(count),
+        )
+
     async def _add(self, name, value, variant_type, data_type=None):
         kwargs = {"datatype": data_type} if data_type is not None else {}
         return await self.folder.add_variable(
@@ -169,7 +219,8 @@ class DataTypeDemo:
         self.last_service = datetime.now(timezone.utc)
 
     async def update(self, *, state, level, target_level, flow, power, bearing_temp,
-                     inflow_temp, filter_state, run_hours, alarm):
+                     inflow_temp, filter_state, run_hours, alarm, alarm_start=0,
+                     alarm_remaining=0, alarm_count=0, alarm_severity=0):
         """Mirror one simulation step of Pump01. `alarm` is the alarm type or None."""
         self.flow_history = self.flow_history[1:] + [round(float(flow), 2)]
         mode = {"Idle": ua.PumpMode.Idle, "Running": ua.PumpMode.Running,
@@ -181,7 +232,7 @@ class DataTypeDemo:
                               power=power, run_hours=run_hours)
 
         def ext(value):
-            return ua.DataValue(ua.Variant(value, ua.VariantType.ExtensionObject))
+            return stamped(value, ua.VariantType.ExtensionObject)
 
         write = self.server.write_attribute_value
         await write(self.pump_status.nodeid, ext(status))
@@ -190,20 +241,23 @@ class DataTypeDemo:
                                                          Temperature=float(bearing_temp))))
         await write(self.setpoint.nodeid, ext(self._setpoint(target_level, alarm)))
         await write(self.flow_history_node.nodeid,
-                    ua.DataValue(ua.Variant(list(self.flow_history), ua.VariantType.Double)))
+                    stamped(ua.Variant(list(self.flow_history), ua.VariantType.Double)))
         await write(self.temperatures.nodeid,
-                    ua.DataValue(ua.Variant([round(float(inflow_temp), 1),
+                    stamped(ua.Variant([round(float(inflow_temp), 1),
                                              round(float(bearing_temp), 1)],
                                             ua.VariantType.Double)))
         await write(self.last_service_node.nodeid,
-                    ua.DataValue(ua.Variant(self.last_service, ua.VariantType.DateTime)))
+                    stamped(ua.Variant(self.last_service, ua.VariantType.DateTime)))
         await write(self.status_text.nodeid,
-                    ua.DataValue(ua.Variant(ua.LocalizedText(state, "en-US"),
+                    stamped(ua.Variant(ua.LocalizedText(state, "en-US"),
                                             ua.VariantType.LocalizedText)))
         code = ALARM_STATUS.get(alarm, ua.StatusCodes.BadUnexpectedError) if alarm \
             else ua.StatusCodes.Good
         await write(self.last_error.nodeid,
-                    ua.DataValue(ua.Variant(ua.StatusCode(code), ua.VariantType.StatusCode)))
+                    stamped(ua.Variant(ua.StatusCode(code), ua.VariantType.StatusCode)))
         await write(self.raw_frame.nodeid,
-                    ua.DataValue(ua.Variant(self._frame(level, filter_state, flow),
+                    stamped(ua.Variant(self._frame(level, filter_state, flow),
                                             ua.VariantType.ByteString)))
+        if hasattr(self, "alarm_info"):
+            await write(self.alarm_info.nodeid, ext(self._alarm_info(
+                alarm, alarm_severity, alarm_start, alarm_remaining, alarm_count)))

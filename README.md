@@ -1,15 +1,41 @@
 # Overview
 
-This container will run an OPC-UA Demo Server based on https://github.com/FreeOpcUa/opcua-asyncio. You can connect to it on port 4840 without any authentication.
+This container runs an OPC UA demo server based on [asyncua](https://github.com/FreeOpcUa/opcua-asyncio) 2.1.0. You can connect to it on port 4840 without any authentication, either without security or with Basic256Sha256 (Sign or SignAndEncrypt).
 
 The server will simulate an industrial pump including al lot of runtime values. Basic idea is that the pump measures the pump has an operating level flow, filter state and power consumption.
 
 ## Functionality
 
-Over time the filter is slowly clogging. This reduces the flow and increases the needed power. If the filter degrades below 30% the pump will throw an alarm and stops. After a period the cycle starts from scratch.
+Over time the filter slowly clogs. This reduces the flow and increases the power the pump needs. If the filter state drops below 20%, the pump raises an alarm and stops. Low oil (below 15%), an overheated bearing (above 75 °C), a random power failure, and a leakage also raise alarms. After `PUMP_AUTO_RESET_MINUTES` the alarm clears and the cycle starts again.
 
-There are opc-ua methods included to configure the server over opc-ua. These are e.g. startPump, stopPump, resetfilter, changeOil etc. just play with it.
-On the ServerConfig node you can update the update interval.
+Pump01 has OPC UA methods to control it: `startPump`, `stopPump`, `setOperatingLevel`, `setFilterDegradationRate`, `setAutoResetMinutes`, `resetFilter`, and `changeOil`. All method arguments have names and descriptions.
+
+You can also write these variables directly. A write has the same effect as calling the matching method, and an invalid value is rejected (the variable shows the active value again after the next update):
+
+| Variable | Effect |
+|---|---|
+| `ServerConfig.updateInterval` | update interval in seconds (0.1 to 60), same as `setUpdateInterval` |
+| `Pump01.operatingLevel` | target operating level in % (0 to 100), same as `setOperatingLevel` |
+| `Pump01.filterDegradationRate` | minutes until the filter clogs at full load |
+| `Pump01.autoResetMinutes` | minutes the pump stays in alarm |
+| `Pump01.defaultOperatingLevel` | level that `startPump` uses |
+
+### Alarm events
+
+When Pump01 raises or clears an alarm, the server fires a `PumpAlarmEventType` event (a subtype of `BaseEventType`). It is sent from both `Pump01` and the `Server` object, so subscribe to one of them. Besides the standard fields (`Message`, `Severity`, `SourceName`, `Time`), the event has:
+
+- `AlarmType`: `FilterClogged`, `OilLow`, `BearingOverheated`, `PowerFailure`, or `Leakage`
+- `Active`: `true` when the alarm is raised, `false` when it clears
+
+Select these two fields with an event filter on `PumpAlarmEventType`. A filter on `BaseEventType` returns only the standard fields.
+
+### History
+
+The server keeps the values of Pump01's variables in memory, so clients can read their history (HistoryRead, raw values). History is lost when the server restarts.
+
+### Timestamps
+
+All values have a source timestamp and a server timestamp.
 
 ## Configuration
 
@@ -19,6 +45,18 @@ See an example docker-compose.yml file in src/docker-compose.yml. You can set th
       - PUMP_AUTO_RESET_MINUTES=1 # after 1 minute the alarm will be reset and the cycle starts again
       - PUMP_DEFAULT_OPERATING_LEVEL=80 # Pump operating level
       - PUMP_UPDATE_INTERVAL=3.0 # new measurements every 3 seconds
+
+Optional:
+
+      - PUMP_OIL_CHANGE_HOURS=2000 # run hours until the oil is empty
+      - PUMP_HISTORY_HOURS=24 # how long history is kept
+      - PUMP_HISTORY_MAX_VALUES=50000 # history values kept per variable
+      - OPCUA_CERT_DIR=/certs # where the server certificate is stored
+      - OPCUA_CERT_HOSTNAME=opcserver # host name in the certificate (default: the container's host name)
+
+### Server certificate
+
+On first start, the server creates a self-signed certificate in `OPCUA_CERT_DIR` and reuses it while it stays valid. It creates a new one when the host name changes, so the compose files set `hostname: opcserver` and keep `/certs` on a volume. Clients that connect with security must trust this certificate. Client certificates are not checked.
 
 ## Structured values and other data types
 
@@ -40,8 +78,9 @@ and most values follow Pump01's simulation, so they change over time.
 | `RelatedNode`, `RelatedNodeExpanded` | NodeId, ExpandedNodeId | point at `Pump01` |
 | `BrowseNameValue` | QualifiedName | `2:Pump01` |
 | `RawFrame` | ByteString | operating level and filter state (uint16) and flow (float32), big-endian |
+| `AlarmInfo` | `PumpAlarmInfo` structure | a second enum (`AlarmType`, of type `PumpAlarmType`), a LocalizedText field (`Message`), an optional DateTime (`RaisedAt`, present only in alarm), and UInt16, Int32, and UInt32 fields (`Severity`, `RemainingSeconds`, `AlarmCount`) |
 
-The custom types (`PumpStatus`, `PumpMotor`, `PumpReading`, `PumpMode`, `PumpSetpoint`) publish
+The custom types (`PumpStatus`, `PumpMotor`, `PumpReading`, `PumpMode`, `PumpSetpoint`, `PumpAlarmInfo`, `PumpAlarmType`) publish
 their `DataTypeDefinition` (OPC UA 1.04), so a client can decode them without compiled-in type
 information. The definitions live in `src/datatypes.py`.
 
@@ -65,3 +104,14 @@ You can build the image locally with:
 Then you can run the container with:
 
 `docker compose -f src/docker-compose_local.yml up`
+
+To run the server without Docker (Python 3.10 or later):
+
+```sh
+pip install asyncua==2.1.0
+cd src && python3 server.py
+```
+
+### Node ids
+
+The pump variables and methods have numeric node ids (`ns=2;i=...`) that asyncua assigns in creation order. Client configurations store these ids, so add new nodes only at the end of `main()` in `server.py` (after `DataTypeDemo.create`), or give them string node ids.

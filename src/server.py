@@ -1,32 +1,38 @@
 import asyncio
-import copy
 import logging
-import random
-import os
 import math
-from datetime import datetime
+import os
+import random
+import socket
 import time
-from math import sin
+from datetime import timedelta
+from pathlib import Path
 
 from asyncua import ua, uamethod, Server
+from asyncua.common.callback import CallbackType
+from asyncua.crypto.cert_gen import setup_self_signed_certificate
+from cryptography.x509.oid import ExtendedKeyUsageOID
 
-from datatypes import DataTypeDemo
+from datatypes import DataTypeDemo, stamped
 
 
 _logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# OPC UA severity (1-1000) reported with each alarm type
+ALARM_SEVERITY = {
+    "FilterClogged": 500,
+    "OilLow": 600,
+    "Leakage": 700,
+    "BearingOverheated": 800,
+    "PowerFailure": 900,
+}
 
-class SubHandler(object):
-    """
-    Subscription Handler. To receive events from server for a subscription
-    """
 
-    def datachange_notification(self, node, val, data):
-        _logger.warning("Python: New data change event %s %s", node, val)
-
-    def event_notification(self, event):
-        _logger.warning("Python: New event %s", event)
+def _arg(name, variant_type, description):
+    """A named method argument, so clients show `level` instead of an unnamed Int64."""
+    return ua.Argument(Name=name, DataType=ua.NodeId(variant_type.value), ValueRank=-1,
+                       Description=ua.LocalizedText(description))
 
 
 class PumpController:
@@ -54,6 +60,7 @@ class PumpController:
         self.in_alarm_state = False
         self.alarm_type = None  # e.g. "FilterClogged" while in alarm
         self.alarm_start_time = 0
+        self.alarm_count = 0  # alarms raised since start-up
         self.previous_target_level = 0  # Store level before alarm
         self.auto_reset_minutes = float(os.environ.get("PUMP_AUTO_RESET_MINUTES", 3.0))  # Minutes until auto-reset
         
@@ -98,7 +105,18 @@ class PumpController:
             self.last_command = f"setOperatingLevel({level})"
             self.command_success = False
             return -1
-            
+
+    def set_default_operating_level(self, level):
+        """Level that startPump uses"""
+        self.last_command = f"setDefaultOperatingLevel({level})"
+        self.command_success = 0 <= level <= 100
+        if self.command_success:
+            self.default_operating_level = int(level)
+            _logger.info(f"Default operating level set to {level}")
+        else:
+            _logger.warning(f"Invalid default operating level requested: {level}")
+        return self.command_success
+
     def set_filter_degradation_rate(self, minutes_to_clog):
         """Set how quickly the filter gets clogged (in minutes to reach 0%)"""
         if minutes_to_clog <= 0:
@@ -153,6 +171,7 @@ class PumpController:
             self.in_alarm_state = True
             self.alarm_type = alarm_type
             self.alarm_start_time = time.time()
+            self.alarm_count += 1
             self.previous_target_level = self.target_level
             self.target_level = 0  # Stop the pump
             
@@ -229,9 +248,7 @@ def change_oil(parent):
     return pump_controller.change_oil()
 
 
-# Method to set the update interval
-@uamethod
-def set_update_interval(parent, seconds):
+def apply_update_interval(seconds):
     global update_interval
     if seconds < 0.1:
         _logger.warning(f"Invalid update interval requested: {seconds} (must be ≥ 0.1)")
@@ -239,16 +256,97 @@ def set_update_interval(parent, seconds):
     if seconds > 60:
         _logger.warning(f"Invalid update interval requested: {seconds} (must be ≤ 60)")
         return False
-    
+
     update_interval = float(seconds)
     _logger.info(f"Update interval set to {update_interval} seconds")
     return True
 
 
+# Method to set the update interval
+@uamethod
+def set_update_interval(parent, seconds):
+    return apply_update_interval(seconds)
+
+
+async def setup_certificate(server):
+    """
+    Load a self-signed certificate so the Basic256Sha256 endpoints work. The certificate is
+    created on first start in OPCUA_CERT_DIR and reused while it stays valid.
+    """
+    cert_dir = Path(os.environ.get("OPCUA_CERT_DIR", "certs"))
+    cert_dir.mkdir(parents=True, exist_ok=True)
+    key_file = cert_dir / "server_key.pem"
+    cert_file = cert_dir / "server_cert.der"
+    host_name = os.environ.get("OPCUA_CERT_HOSTNAME", socket.gethostname())
+    await setup_self_signed_certificate(
+        key_file,
+        cert_file,
+        server.get_application_uri(),
+        host_name,
+        [ExtendedKeyUsageOID.SERVER_AUTH],
+        {"commonName": "Cumulocity Demo OPC UA Server", "organizationName": "Cumulocity"},
+    )
+    await server.load_certificate(cert_file)
+    await server.load_private_key(key_file)
+    _logger.info(f"Loaded server certificate {cert_file} (host name {host_name})")
+
+
+class AlarmEvents:
+    """
+    Fires a PumpAlarmEventType event when Pump01 raises or clears an alarm. The event is sent
+    from Pump01 and from the Server object, so clients that subscribe to either receive it.
+    """
+
+    @classmethod
+    async def create(cls, server, idx, pump01):
+        self = cls()
+        event_type = await server.create_custom_event_type(
+            idx, "PumpAlarmEventType", ua.ObjectIds.BaseEventType,
+            [("AlarmType", ua.VariantType.String), ("Active", ua.VariantType.Boolean)],
+        )
+        self.generators = []
+        for emitting_node in (pump01.nodeid, ua.NodeId(ua.ObjectIds.Server)):
+            generator = await server.get_event_generator(event_type, emitting_node)
+            generator.event.SourceNode = pump01.nodeid
+            generator.event.SourceName = "Pump01"
+            self.generators.append(generator)
+        return self
+
+    async def fire(self, alarm_type, active):
+        message = f"{alarm_type} alarm {'raised' if active else 'cleared'} on Pump01"
+        _logger.info(f"Event: {message}")
+        for generator in self.generators:
+            generator.event.AlarmType = alarm_type
+            generator.event.Active = active
+            generator.event.Severity = ALARM_SEVERITY.get(alarm_type, 500)
+            await generator.trigger(message=message)
+
+
+def config_write_handler(config_nodes):
+    """
+    Apply values that clients write to the configuration variables, so a write has the same
+    effect as calling the matching method. An invalid value is rejected by the controller and
+    the variable shows the active value again after the next update.
+    """
+    async def on_post_write(event, dispatcher):
+        for write_value, status in zip(event.request_params.NodesToWrite, event.response_params):
+            apply = config_nodes.get(write_value.NodeId)
+            if apply is None or write_value.AttributeId != ua.AttributeIds.Value or not status.is_good():
+                continue
+            value = write_value.Value.Value.Value if write_value.Value.Value is not None else None
+            if value is None:
+                continue
+            _logger.info(f"Client wrote {value} to {write_value.NodeId.to_string()}")
+            try:
+                apply(value)
+            except (TypeError, ValueError) as e:
+                _logger.warning(f"Ignored write to {write_value.NodeId.to_string()}: {e}")
+    return on_post_write
+
+
 async def main():
     server = Server()
     await server.init()
-    server.historize_node_data_changes = True
     server.set_endpoint("opc.tcp://0.0.0.0:4840/")
     server.set_server_name("Cumulocity Demo OPC UA Server")
     server.set_security_policy(
@@ -258,6 +356,7 @@ async def main():
             ua.SecurityPolicyType.Basic256Sha256_Sign,
         ]
     )
+    await setup_certificate(server)
 
     # setup our own namespace
     uri = "http://www.cumulocity.com"
@@ -275,8 +374,8 @@ async def main():
         idx,
         "setUpdateInterval",
         set_update_interval,
-        [ua.VariantType.Double],  # seconds
-        [ua.VariantType.Boolean]  # success/failure
+        [_arg("seconds", ua.VariantType.Double, "Update interval in seconds (0.1 to 60)")],
+        [_arg("success", ua.VariantType.Boolean, "True if the command was accepted")]
     )
 
     # populating our address space
@@ -345,24 +444,24 @@ async def main():
         idx, 
         "stopPump", 
         stop_pump, 
-        [], 
-        [ua.VariantType.Boolean]
+        [],
+        [_arg("success", ua.VariantType.Boolean, "True if the command was accepted")]
     )
     
     await pump01.add_method(
         idx, 
         "startPump", 
         start_pump, 
-        [], 
-        [ua.VariantType.Boolean]
+        [],
+        [_arg("success", ua.VariantType.Boolean, "True if the command was accepted")]
     )
     
     await pump01.add_method(
         idx,
         "setOperatingLevel",
         set_operating_level,
-        [ua.VariantType.Int64],
-        [ua.VariantType.Int64]
+        [_arg("level", ua.VariantType.Int64, "Operating level in % (0 to 100)")],
+        [_arg("level", ua.VariantType.Int64, "The new level, or -1 if the level was rejected")]
     )
     
     # Add method to configure filter degradation rate
@@ -370,8 +469,8 @@ async def main():
         idx,
         "setFilterDegradationRate",
         set_filter_degradation_rate,
-        [ua.VariantType.Int64],  # minutes to clog
-        [ua.VariantType.Boolean]  # success/failure
+        [_arg("minutesToClog", ua.VariantType.Int64, "Minutes until the filter is clogged at full load")],
+        [_arg("success", ua.VariantType.Boolean, "True if the command was accepted")]
     )
     
     # Add method to configure auto-reset minutes
@@ -379,8 +478,8 @@ async def main():
         idx,
         "setAutoResetMinutes",
         set_auto_reset_minutes,
-        [ua.VariantType.Double],  # minutes
-        [ua.VariantType.Boolean]  # success/failure
+        [_arg("minutes", ua.VariantType.Double, "Minutes the pump stays in alarm before it resets")],
+        [_arg("success", ua.VariantType.Boolean, "True if the command was accepted")]
     )
     
     # Add method to manually reset the filter
@@ -389,7 +488,7 @@ async def main():
         "resetFilter",
         reset_filter,
         [],
-        [ua.VariantType.Boolean]
+        [_arg("success", ua.VariantType.Boolean, "True if the command was accepted")]
     )
     
     # Add method to manually change the oil
@@ -398,7 +497,7 @@ async def main():
         "changeOil",
         change_oil,
         [],
-        [ua.VariantType.Boolean]
+        [_arg("success", ua.VariantType.Boolean, "True if the command was accepted")]
     )
 
     # Add Pump02 (dummy pump with static values)
@@ -434,14 +533,35 @@ async def main():
     # Structured values and the less common built-in types (see datatypes.py)
     datatype_demo = await DataTypeDemo.create(server, idx, pump01)
 
+    # Add new nodes only below this line. Numeric node ids (ns=2;i=...) are assigned in
+    # creation order and clients store them, so a node added further up would shift the ids
+    # of all nodes after it.
+    await datatype_demo.add_alarm_info()
+    alarm_events = await AlarmEvents.create(server, idx, pump01)
+
+    # Writing a configuration variable has the same effect as calling its method
+    config_nodes = {
+        update_interval_var.nodeid: apply_update_interval,
+        performance.nodeid: pump_controller.set_operating_level,
+        filter_degradation_rate.nodeid: pump_controller.set_filter_degradation_rate,
+        auto_reset_minutes.nodeid: pump_controller.set_auto_reset_minutes,
+        default_operating_level.nodeid: pump_controller.set_default_operating_level,
+    }
+    server.subscribe_server_callback(CallbackType.PostWrite, config_write_handler(config_nodes))
+
     # starting!
     async with server:
-        print("Available loggers are: ", logging.Logger.manager.loggerDict.keys())
-        _logger.info("Server started with environment-based configuration")
-        # enable following if you want to subscribe to nodes on server side
-        # handler = SubHandler()
-        # sub = await server.create_subscription(500, handler)
-        # handle = await sub.subscribe_data_change(flow)
+        # Keep Pump01's values in memory so clients can read their history
+        history_hours = float(os.environ.get("PUMP_HISTORY_HOURS", 24))
+        history_max_values = int(os.environ.get("PUMP_HISTORY_MAX_VALUES", 50000))
+        await server.historize_node_data_change(
+            [performance, status, flow, alarm, power, run_hours, filter_state, oil_level,
+             inflow_temperature, bearing_temperature, alarm_time_remaining],
+            period=timedelta(hours=history_hours),
+            count=history_max_values,
+        )
+        _logger.info(f"Server started, history kept for {history_hours} h "
+                     f"(at most {history_max_values} values per node)")
         runHoursValue = 0
         # Add pump simulation state variables
         pumpState = "Idle"
@@ -464,13 +584,16 @@ async def main():
             
             # Update the update_interval variable in OPC UA
             await server.write_attribute_value(
-                update_interval_var.nodeid, ua.DataValue(update_interval)
+                update_interval_var.nodeid, stamped(update_interval)
             )
             
             # Check if we should auto-reset from alarm state
+            cleared_alarm = pump_controller.alarm_type
             if pump_controller.check_alarm_auto_reset():
                 _logger.info("Auto-reset activated: clearing alarm and resetting filter")
                 filterStateValue = 100  # Reset filter to 100% clean
+                await alarm_events.fire(cleared_alarm, active=False)
+            alarm_before = pump_controller.alarm_type
             
             # Get target level from the controller
             targetLevel = pump_controller.target_level
@@ -612,6 +735,9 @@ async def main():
                 alarmType = "Leakage"
                 pump_controller.enter_alarm_state(alarmType)
             
+            if pump_controller.alarm_type and alarm_before is None:
+                await alarm_events.fire(pump_controller.alarm_type, active=True)
+
             # Calculate alarm time remaining
             alarm_remaining_seconds = 0
             if pump_controller.in_alarm_state:
@@ -660,54 +786,54 @@ async def main():
             
             # Write values to OPC UA server (only for Pump01)
             await server.write_attribute_value(
-                power.nodeid, ua.DataValue(int(powerValue))
+                power.nodeid, stamped(int(powerValue))
             )
             await server.write_attribute_value(
-                status.nodeid, ua.DataValue(pumpState)
+                status.nodeid, stamped(pumpState)
             )
             await server.write_attribute_value(
-                flow.nodeid, ua.DataValue(float(flowValue))
+                flow.nodeid, stamped(float(flowValue))
             )
             await server.write_attribute_value(
-                run_hours.nodeid, ua.DataValue(int(runHoursValue))
+                run_hours.nodeid, stamped(int(runHoursValue))
             )
             await server.write_attribute_value(
-                alarm.nodeid, ua.DataValue(int(alarmValue))
+                alarm.nodeid, stamped(int(alarmValue))
             )
             await server.write_attribute_value(
-                performance.nodeid, ua.DataValue(int(currentLevel))
+                performance.nodeid, stamped(int(currentLevel))
             )
             await server.write_attribute_value(
-                filter_state.nodeid, ua.DataValue(int(filterStateValue))
+                filter_state.nodeid, stamped(int(filterStateValue))
             )
             await server.write_attribute_value(
-                oil_level.nodeid, ua.DataValue(int(oilLevelValue))
+                oil_level.nodeid, stamped(int(oilLevelValue))
             )
             await server.write_attribute_value(
-                inflow_temperature.nodeid, ua.DataValue(float(round(inflowTempValue, 1)))
+                inflow_temperature.nodeid, stamped(float(round(inflowTempValue, 1)))
             )
             await server.write_attribute_value(
-                bearing_temperature.nodeid, ua.DataValue(float(round(bearingTempValue, 1)))
+                bearing_temperature.nodeid, stamped(float(round(bearingTempValue, 1)))
             )
             await server.write_attribute_value(
-                alarm_time_remaining.nodeid, ua.DataValue(int(alarm_remaining_seconds))
+                alarm_time_remaining.nodeid, stamped(int(alarm_remaining_seconds))
             )
             await server.write_attribute_value(
-                filter_degradation_rate.nodeid, ua.DataValue(int(current_degradation_rate))
+                filter_degradation_rate.nodeid, stamped(int(current_degradation_rate))
             )
             await server.write_attribute_value(
-                auto_reset_minutes.nodeid, ua.DataValue(float(pump_controller.auto_reset_minutes))
+                auto_reset_minutes.nodeid, stamped(float(pump_controller.auto_reset_minutes))
             )
             await server.write_attribute_value(
-                default_operating_level.nodeid, ua.DataValue(int(pump_controller.default_operating_level))
+                default_operating_level.nodeid, stamped(int(pump_controller.default_operating_level))
             )
             
             # Update command status variables
             await server.write_attribute_value(
-                last_command.nodeid, ua.DataValue(pump_controller.last_command)
+                last_command.nodeid, stamped(pump_controller.last_command)
             )
             await server.write_attribute_value(
-                command_success.nodeid, ua.DataValue(pump_controller.command_success)
+                command_success.nodeid, stamped(pump_controller.command_success)
             )
 
             await datatype_demo.update(
@@ -721,9 +847,12 @@ async def main():
                 filter_state=filterStateValue,
                 run_hours=runHoursValue,
                 alarm=pump_controller.alarm_type,
+                alarm_start=pump_controller.alarm_start_time,
+                alarm_remaining=alarm_remaining_seconds,
+                alarm_count=pump_controller.alarm_count,
+                alarm_severity=ALARM_SEVERITY.get(pump_controller.alarm_type, 0),
             )
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
