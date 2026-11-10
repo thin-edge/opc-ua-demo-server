@@ -115,3 +115,19 @@ cd src && python3 server.py
 ### Node ids
 
 The pump variables and methods have numeric node ids (`ns=2;i=...`) that asyncua assigns in creation order. Client configurations store these ids, so add new nodes only at the end of `main()` in `server.py` (after `DataTypeDemo.create`), or give them string node ids.
+
+## Releasing
+
+The `release` workflow (`.github/workflows/release.yaml`) builds the image for `linux/amd64` and `linux/arm64`, pushes it to `ghcr.io/thin-edge/opc-ua-demo-server`, and then creates the git tag and a GitHub release with generated notes.
+
+1. In GitHub, open **Actions > release > Run workflow**.
+2. Keep the branch on `main` and enter the new version, such as `0.1.0` (no `v` prefix).
+
+Pushing a tag such as `0.1.0` starts the same workflow.
+
+| Version | Image tags |
+|---|---|
+| `0.1.0` | `0.1.0`, `0.1`, `latest` |
+| `0.2.0-rc.1` | `0.2.0-rc.1` (marked as a prerelease, `latest` is unchanged) |
+
+The tag and release are created only after the image was pushed. If the build fails, nothing is tagged and you can run the workflow again with the same version.
