@@ -494,3 +494,5 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,intellij,windows,macos,linux,python,java,angular,eclipse
+# Server certificate created on local runs
+certs/

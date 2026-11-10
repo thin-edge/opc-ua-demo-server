@@ -2,10 +2,13 @@ version: "3.2"
 services:
   opcserver:
     container_name: opcserver
-    image: switschel/opc-ua-demo-server:latest
+    hostname: opcserver # the certificate is issued for this name
+    image: ghcr.io/thin-edge/opc-ua-demo-server:latest
     restart: always
     ports:
       - "4840:4840"
+    volumes:
+      - opcua-certs:/certs # keeps the server certificate across restarts
     networks:
       backend:
     environment:
@@ -17,3 +20,6 @@ services:
 networks:
   backend:
     name: opc-ua-gateway_backend
+
+volumes:
+  opcua-certs:
